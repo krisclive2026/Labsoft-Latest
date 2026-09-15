@@ -739,16 +739,6 @@
           </div>
           <div id="s-logo-preview" style="margin-top:10px"></div>
         </div>
-        <div class="settings-section">
-          <div class="settings-title">New Report — Quick Search</div>
-          <div class="form-group">
-            <label>When a subcategory is picked from quick search</label>
-            <select id="s-nr-subcategory-mode" class="form-input">
-              <option value="subcategory">Add only that subcategory</option>
-              <option value="category">Add the whole category</option>
-            </select>
-          </div>
-        </div>
       </div>
       <button class="btn btn-primary" onclick="saveSettings()">💾 Save Lab Info</button>
     </div>
@@ -1191,9 +1181,20 @@
  
     <div id="stab-content-links" style="display:none">
       <div class="settings-section" style="max-width:760px">
+        <div class="settings-title">New Report — Quick Search</div>
+        <div class="form-group">
+          <label>When a subcategory is picked from quick search</label>
+          <select id="s-nr-subcategory-mode" class="form-input" onchange="saveSettings()">
+            <option value="subcategory">Add only that subcategory</option>
+            <option value="category">Add the whole category</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-section" style="max-width:760px">
         <div class="settings-title">🔗 Linked Subcategories</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:14px">
-          Group subcategories that should always be ordered together (e.g. CBC + DC). When "New Report — Quick Search"
+          Group subcategories that should always be ordered together (e.g. CBC + DC). When the setting above
           is set to <b>Add only that subcategory</b>, picking any one member from quick search will also add the rest
           of its group. This has no effect when that setting is "Add the whole category".
         </div>
