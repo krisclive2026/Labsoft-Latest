@@ -138,7 +138,7 @@ def handle_unexpected_error(e):
 # ── LICENSE ENFORCEMENT — block all API routes when license is invalid ─────────
 UNPROTECTED_ROUTES = {
     'index', 'license_status', 'license_activate', 'license_machine_id',
-    'get_session_count', 'static', 'heartbeat'
+    'get_session_count', 'static'
 }
  
 @app.before_request
@@ -3082,7 +3082,7 @@ def save_report_workflow():
     d_name = (data.get('doctor_name') or '').strip()
     r_title = data.get('report_title', 'Lab Report')
     r_date = data.get('report_date', datetime.now().strftime('%Y-%m-%d'))
-    html = data.get('html_content', '')
+    html = strip_empty_report_rows(data.get('html_content', ''))
     p_id = data.get('patient_id')
     p_no = data.get('patient_no', '')
     d_id = data.get('doctor_id')
@@ -3305,6 +3305,13 @@ def get_report_tests_for_bill():
 # ── PDF COMPATIBILITY UTILITIES ──────────────────────────────────────────────
 PDF_FOOTER_HEIGHT_MM = 25
 
+def strip_empty_report_rows(html):
+    """Remove empty rows from report HTML before saving/rendering PDF."""
+    if not html:
+        return ""
+    import re
+    return re.sub(r'(?is)<tr\b[^>]*\brpt-row-empty\b[^>]*>.*?</tr>', '', html)
+
 def fix_html_for_pdf(html):
     """
     Sanitizes HTML/CSS for xhtml2pdf (pisa).
@@ -3449,10 +3456,10 @@ def generate_pdf(rid):
         return jsonify({'error': 'Not found'}), 404
  
     data = request.json or {}
-    html_content = data.get('html_content', '')
+    html_content = strip_empty_report_rows(data.get('html_content', ''))
     if not html_content:
         return jsonify({'error': 'No HTML content provided'}), 400
- 
+
     out_path = os.path.join(UPLOAD_FOLDER, f"report_{rid}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf")
     pdf_generated = False
     
@@ -5212,30 +5219,6 @@ def license_machine_id():
 def get_session_count():
     return jsonify({'count': _read_session_count()})
  
-# ── AUTO-SHUTDOWN: stop the server when no browser tab is open anymore ────────
-# The frontend pings this every few seconds while any tab/window is open.
-# If no ping arrives for a while (tab closed, browser closed, PC put the app
-# in the background and stopped it, etc.) the watchdog below shuts the whole
-# process down — so LabSoft doesn't keep running invisibly after you're done.
-_last_heartbeat = _time.time()
-_HEARTBEAT_TIMEOUT = 90  # seconds without a ping before shutting down
-# (was 15s — too short: browsers throttle background/minimized-tab timers,
-# so a normal alt-tab or brief PC sleep could stop pings for longer than
-# that and cause the server to shut itself down while the app looked fine.)
-
-@app.route('/api/heartbeat', methods=['POST'])
-def heartbeat():
-    global _last_heartbeat
-    _last_heartbeat = _time.time()
-    return jsonify({'ok': True})
-
-def _shutdown_watchdog():
-    while True:
-        _time.sleep(2)
-        if _time.time() - _last_heartbeat > _HEARTBEAT_TIMEOUT:
-            print("No open LabSoft tab detected — shutting down.")
-            os._exit(0)
-
 # Inside your main block
 if __name__ == "__main__":
     port = 5000
@@ -5245,9 +5228,5 @@ if __name__ == "__main__":
         increment_session_count()
     # Open browser after 1 second
     Timer(1, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
-    # Auto-shutdown watchdog disabled — it was killing the server during
-    # normal use whenever the browser throttled the heartbeat timer in a
-    # backgrounded/minimized tab (see _shutdown_watchdog/heartbeat above).
     # The server now stays running until the process is closed manually.
-    # Thread(target=_shutdown_watchdog, daemon=True).start()
     app.run(debug=False, port=port)
