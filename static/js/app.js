@@ -1056,7 +1056,19 @@ async function printReport() {
         probe.style.width = 'calc(210mm - 24mm)';
         probe.style.visibility = 'hidden';
         probe.style.pointerEvents = 'none';
-        probe.appendChild(node.cloneNode(true));
+        var clone = node.cloneNode(true);
+        // Rows still blank of a result collapse to display:none at actual
+        // print time (see the .rpt-row-empty rule under @media print), but
+        // on screen — where this measurement runs — they are still fully
+        // rendered with their input boxes. Hide them here too so the height
+        // we measure matches what will really print; otherwise pagination
+        // reserves space for rows that vanish later, leaving gaps on the
+        // page and stranding later content (e.g. interpretations) onto the
+        // next page unnecessarily.
+        (clone.classList && clone.classList.contains('rpt-row-empty') ? [clone] : []).concat(
+          Array.prototype.slice.call(clone.querySelectorAll ? clone.querySelectorAll('.rpt-row-empty') : [])
+        ).forEach(function(el) { el.style.display = 'none'; });
+        probe.appendChild(clone);
         measureWrap.appendChild(probe);
         var h = probe.getBoundingClientRect().height;
         measureWrap.removeChild(probe);
@@ -4334,7 +4346,113 @@ function _doOpenPrintWindow(fdDesign, patientName, patientAge, patientGender, pa
   // right when Print is clicked — then prints. Runs before window.print()
   // so the saved copy always matches what went to the printer.
   var _nrAlreadySaved = false;
+  // buildPages() itself is declared inside the pagination IIFE further down
+  // this script (so it stays out of the way of everything above), which
+  // means this outer scope can't call it directly by name. That IIFE
+  // assigns itself here right after defining it, so rptRepaginateForPrint()
+  // below has a way to re-run pagination on demand.
+  var _rptBuildPagesRef = null;
+  // Copies every live-typed Result/Unit/Reference value into the matching
+  // row of the hidden #rpt-measure-wrap master copy (which still holds
+  // whatever was there when this popup first opened), then recomputes
+  // .rpt-row-empty on those rows -- and on the reference-tables and
+  // subgroup headers tied to them -- the same way rptRefreshRowStyle /
+  // rptRefreshGroupHeader do for the live copy. Needed so the pre-print
+  // repagination below (rptRepaginateForPrint) measures the CURRENT,
+  // just-typed state rather than the stale one from when the popup opened.
+  function rptSyncMeasureWrapFromLive() {
+    var measureWrap = document.getElementById('rpt-measure-wrap');
+    var pagesEl = document.getElementById('rpt-pages-container');
+    if (!measureWrap || !pagesEl) return;
+
+    Array.prototype.slice.call(pagesEl.querySelectorAll('[data-field]')).forEach(function(liveInp) {
+      var tr = liveInp.closest('tr');
+      if (!tr) return;
+      var sec = tr.getAttribute('data-sec'), grp = tr.getAttribute('data-grp'), row = tr.getAttribute('data-row');
+      if (sec === null || grp === null || row === null) return;
+      var field = liveInp.getAttribute('data-field');
+      var mwRow = measureWrap.querySelector('tr.rpt-result-row[data-sec="' + sec + '"][data-grp="' + grp + '"][data-row="' + row + '"]');
+      var mwInp = mwRow && mwRow.querySelector('[data-field="' + field + '"]');
+      // Use the value ATTRIBUTE, not the JS property: buildPages() clones
+      // these nodes with cloneNode(true), and a clone only reliably picks
+      // up an <input>'s current text via its value attribute, not a value
+      // assigned later purely as a property.
+      if (mwInp) mwInp.setAttribute('value', liveInp.value || '');
+    });
+
+    Array.prototype.slice.call(measureWrap.querySelectorAll('tr.rpt-result-row')).forEach(function(tr) {
+      var resultInput = tr.querySelector('.rpt-result-input');
+      var hasResult = !!(resultInput && (resultInput.value || '').trim() !== '');
+      tr.classList.toggle('rpt-row-empty', !hasResult);
+      var sec = tr.getAttribute('data-sec'), grp = tr.getAttribute('data-grp'), row = tr.getAttribute('data-row');
+      var refRow = measureWrap.querySelector('tr.rpt-refnote-row[data-sec="' + sec + '"][data-grp="' + grp + '"][data-row="' + row + '"]');
+      if (refRow) refRow.classList.toggle('rpt-row-empty', !hasResult);
+    });
+    Array.prototype.slice.call(measureWrap.querySelectorAll('tr.rpt-subgroup-row')).forEach(function(header) {
+      var sec = header.getAttribute('data-sec'), grp = header.getAttribute('data-grp');
+      var groupRows = measureWrap.querySelectorAll('tr.rpt-result-row[data-sec="' + sec + '"][data-grp="' + grp + '"]');
+      var anyResult = false;
+      groupRows.forEach(function(r) {
+        var inp = r.querySelector('.rpt-result-input');
+        if (inp && (inp.value || '').trim() !== '') anyResult = true;
+      });
+      header.classList.toggle('rpt-row-empty', !anyResult);
+    });
+  }
+
+  // Re-runs pagination once, right before printing, with still-blank rows
+  // collapsed the same way @media print collapses them -- so the page
+  // breaks the browser actually prints match what's on screen, instead of
+  // the generous (nothing-clips-while-typing) page breaks buildPages()
+  // computed when the popup first opened. See the comment on
+  // forcePrintRebuild in buildPages() and on the collapse branch inside its
+  // measureNodeHeight() for why this can't just be the default measurement
+  // used throughout editing.
+  function rptRepaginateForPrint() {
+    var measureWrap = document.getElementById('rpt-measure-wrap');
+    var headerClone = document.getElementById('rpt-header-clone');
+    var footerClone = document.getElementById('rpt-footer-clone');
+    if (!measureWrap || typeof _rptBuildPagesRef !== 'function') return;
+    rptSyncMeasureWrapFromLive();
+    // buildPages() re-hides all three of these at the end of every run
+    // (successful or not), so there is nothing to restore here afterwards.
+    measureWrap.style.display = '';
+    if (headerClone) headerClone.style.display = '';
+    if (footerClone) footerClone.style.display = '';
+    _rptBuildPagesRef(true);
+  }
+
   function rptPrintAndSave() {
+    // Snapshot the current, generous/editable page layout before rebuilding
+    // it for print below. The rebuild is only correct for the printed
+    // output (it assumes still-blank rows collapse away, which is only
+    // true under @media print) -- shown plainly on screen instead, that
+    // same rebuilt layout overflows its fixed-height page boxes and a page
+    // can appear to vanish. So once the print dialog closes, whether the
+    // person actually printed or hit Cancel, put this original layout back.
+    var pagesEl = document.getElementById('rpt-pages-container');
+    // innerHTML serializes <input> elements from their "value" ATTRIBUTE, not
+    // the live .value property that typing actually changes (rptFieldInput
+    // above only ever sets the property). Without this sync, the snapshot
+    // below silently captures the stale/blank values from when this popup
+    // was first built, and restoreOriginalPages() then paints that stale
+    // snapshot back onto the screen once afterprint fires -- which happens
+    // whether Print or Cancel was clicked -- making typed values disappear.
+    if (pagesEl) {
+      Array.prototype.slice.call(pagesEl.querySelectorAll('[data-field]')).forEach(function(inp) {
+        inp.setAttribute('value', inp.value || '');
+      });
+    }
+    var originalPagesHTML = pagesEl ? pagesEl.innerHTML : null;
+    if (pagesEl && originalPagesHTML !== null) {
+      var restoreOriginalPages = function() {
+        pagesEl.innerHTML = originalPagesHTML;
+        window.removeEventListener('afterprint', restoreOriginalPages);
+      };
+      window.addEventListener('afterprint', restoreOriginalPages);
+    }
+
+    rptRepaginateForPrint();
     if (!_nrAlreadySaved && window.opener && !window.opener.closed && window._nrSaveMeta && window.opener.nrSaveReportFromPreview) {
       _nrAlreadySaved = true;
       // The saved html_content is later turned into a PDF by xhtml2pdf on
@@ -4376,6 +4494,24 @@ function _doOpenPrintWindow(fdDesign, patientName, patientAge, patientGender, pa
       if (cls) td.classList.add(cls);
     }
     tr.classList.toggle('rpt-row-empty', !resultInput || resultInput.value.trim() === '');
+    rptRefreshGroupHeader(tr);
+  }
+
+  // A subcategory header (e.g. "DIFFERENTIAL COUNT") should only print when at
+  // least one of its rows has a result — keeps this in sync as results are typed.
+  function rptRefreshGroupHeader(tr) {
+    var secIdx = tr.getAttribute('data-sec');
+    var gi = tr.getAttribute('data-grp');
+    if (secIdx === null || gi === null) return;
+    var body = tr.closest('tbody') || document;
+    var groupRows = body.querySelectorAll('tr.rpt-result-row[data-sec="' + secIdx + '"][data-grp="' + gi + '"]');
+    var anyResult = false;
+    groupRows.forEach(function (r) {
+      var inp = r.querySelector('.rpt-result-input');
+      if (inp && inp.value.trim() !== '') anyResult = true;
+    });
+    var header = body.querySelector('tr.rpt-subgroup-row[data-sec="' + secIdx + '"][data-grp="' + gi + '"]');
+    if (header) header.classList.toggle('rpt-row-empty', !anyResult);
   }
 
   function rptFieldInput(inputEl) {
@@ -4427,6 +4563,12 @@ function _doOpenPrintWindow(fdDesign, patientName, patientAge, patientGender, pa
     }
   }
   (function() {
+    // Publish buildPages (declared further down, but hoisted to the top of
+    // this IIFE) to the outer scope, since rptPrintAndSave()/
+    // rptRepaginateForPrint() above are declared outside this IIFE and have
+    // no other way to call it for the pre-print repagination pass.
+    _rptBuildPagesRef = buildPages;
+
     // Catch up on any calculated fields (VLDL, A/G ratio, absolute counts, etc.)
     // right when this preview finishes loading. The opener already recalculates
     // before opening this window, but that snapshot can be stale by the time this
@@ -4480,7 +4622,7 @@ function _doOpenPrintWindow(fdDesign, patientName, patientAge, patientGender, pa
       return h;
     }
 
-    function buildPages() {
+    function buildPages(forcePrintRebuild) {
       var measureWrap = document.getElementById('rpt-measure-wrap');
       var headerClone = document.getElementById('rpt-header-clone');
       var footerClone = document.getElementById('rpt-footer-clone');
@@ -4496,7 +4638,11 @@ function _doOpenPrintWindow(fdDesign, patientName, patientAge, patientGender, pa
       // offsetParent, which is null for every descendant of a display:none
       // element, so a rebuild here would wipe the container and leave the
       // reopened report permanently blank.
-      if (measureWrap.style.display === "none") return;
+      // forcePrintRebuild (set only by the pre-print pass in rptPrintAndSave)
+      // bypasses this guard on purpose, since that pass explicitly re-shows
+      // measureWrap/headerClone/footerClone right before calling buildPages()
+      // again with the person's latest typed-in values.
+      if (measureWrap.style.display === "none" && !forcePrintRebuild) return;
 
       var footerHTML = footerClone ? footerClone.innerHTML : '';
       var hasFooter = !!(footerHTML && footerHTML.trim());
@@ -4546,7 +4692,26 @@ function _doOpenPrintWindow(fdDesign, patientName, patientAge, patientGender, pa
         probe.style.width = 'calc(210mm - 24mm)';
         probe.style.visibility = 'hidden';
         probe.style.pointerEvents = 'none';
-        probe.appendChild(node.cloneNode(true));
+        var clone = node.cloneNode(true);
+        // Rows still blank of a result collapse to display:none at actual
+        // print time (see the .rpt-row-empty rule under @media print), but
+        // on screen — where this measurement normally runs — they are
+        // still fully rendered with their input boxes. During the very
+        // first, live-editing build we deliberately measure them at their
+        // full on-screen height: the person hasn't finished typing yet, and
+        // treating still-blank rows as zero height here would under-allocate
+        // pages and clip/hide rows they haven't gotten to. Only the
+        // dedicated pre-print rebuild (forcePrintRebuild, run once against
+        // the final typed-in values right before window.print()) collapses
+        // them, so that pass — and only that pass — matches what will
+        // actually print and lets later content (e.g. interpretations) move
+        // up into the space blank rows free up.
+        if (forcePrintRebuild) {
+          (clone.classList && clone.classList.contains('rpt-row-empty') ? [clone] : []).concat(
+            Array.prototype.slice.call(clone.querySelectorAll ? clone.querySelectorAll('.rpt-row-empty') : [])
+          ).forEach(function(el) { el.style.display = 'none'; });
+        }
+        probe.appendChild(clone);
         measureWrap.appendChild(probe);
         var h = probe.getBoundingClientRect().height;
         measureWrap.removeChild(probe);
@@ -4981,7 +5146,8 @@ async function _previewAndPrintReportImpl() {
 
         const showSubGroup = sec.type !== 'CUSTOM' && grp.group && grp.group !== sec.type && grp.group !== '(General)';
         if (showSubGroup) {
-          secHtml += `<tr class="rpt-subgroup-row">
+          const groupHasResult = grp.rows.some(r => r.result !== undefined && String(r.result).trim() !== '');
+          secHtml += `<tr class="rpt-subgroup-row${groupHasResult ? '' : ' rpt-row-empty'}" data-sec="${sec.idx}" data-grp="${gi}">
           <td class="rpt-test-name" colspan="4" style="font-weight:700;background:#f5f5f5;font-size:10.5px">${grp.group}</td>
         </tr>`;
         }
