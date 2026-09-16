@@ -495,6 +495,26 @@ body {
   border-radius: 0 0 14px 14px;
 }
  
+/* New Test Report Entry: .modal's own 24px padding was fighting with the
+   negative-margin bleed on .modal-header/.modal-footer, breaking their
+   sticky positioning for this particular modal's tall/dynamic content.
+   Removing .modal's own padding here (and letting header/body/footer pad
+   themselves instead) lets the normal sticky header/footer work correctly. */
+#new-report-modal .modal {
+  padding: 0 16px;
+}
+#new-report-modal .modal-header {
+  margin: 0;
+  padding: 24px 24px 14px 24px;
+}
+#new-report-modal .modal-footer {
+  margin: 0;
+  padding: 16px 24px 24px 24px;
+}
+#new-report-modal .nr-modal-body {
+  padding: 0 24px !important;
+}
+
 /* ── Report Detail ──────────────────────────────────────────── */
 .report-detail-grid {
   display: grid;
